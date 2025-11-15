@@ -6,5 +6,5 @@ The **Totalizer Service** is a REST-based microservice responsible for consuming
 
 - Consumes sum messages from Kafka
 - Aggregates values into a persistent file-based store
-- Exposes the `/result` endpoint to return the current total
+- Exposes the `/v1/result` endpoint to return the current total
 - Designed for deployment inside a Kubernetes cluster with full observability support
