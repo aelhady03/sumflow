@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package sum;
+
+option go_package = "github.com/aelhady03/sumflow/adder/proto/sum;sumpb";
+
+service SumNumbersService {
+  rpc SumNumbers(SumNumbersRequest) returns (SumNumbersResponse) {}
+}
+
+message SumNumbersRequest {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+message SumNumbersResponse { int32 z = 1; }
