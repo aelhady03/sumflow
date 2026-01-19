@@ -1,18 +1,45 @@
 package service
 
-import "github.com/aelhady03/sumflow/adder/internal/kafka"
+import (
+	"context"
+
+	"github.com/aelhady03/sumflow/adder/internal/outbox"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
 type AdderService struct {
-	producer kafka.Producer
+	pool       *pgxpool.Pool
+	outboxRepo *outbox.Repository
 }
 
-func NewAdderService(producer kafka.Producer) *AdderService {
+func NewAdderService(pool *pgxpool.Pool, outboxRepo *outbox.Repository) *AdderService {
 	return &AdderService{
-		producer: producer,
+		pool:       pool,
+		outboxRepo: outboxRepo,
 	}
 }
 
-func (a *AdderService) Add(x, y int) (int, error) {
+func (a *AdderService) Add(ctx context.Context, x, y int) (int, error) {
 	sum := x + y
-	return sum, a.producer.Publish(sum)
+
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	event, err := outbox.NewSumCalculatedEvent(x, y, sum)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := a.outboxRepo.InsertInTx(ctx, tx, event); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+
+	return sum, nil
 }

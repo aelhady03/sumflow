@@ -1,29 +1,17 @@
 package service
 
 import (
-	"fmt"
-
 	"github.com/aelhady03/sumflow/totalizer/internal/storage"
 )
 
 type TotalizerService struct {
-	storage storage.Storage
+	storage *storage.PostgresStorage
 }
 
-func NewTotalizerService(storage storage.Storage) *TotalizerService {
+func NewTotalizerService(storage *storage.PostgresStorage) *TotalizerService {
 	return &TotalizerService{
 		storage: storage,
 	}
-}
-
-func (t *TotalizerService) Add(total int) error {
-	current, err := t.storage.Load()
-	if err != nil {
-		return fmt.Errorf("cannot load file storage")
-	}
-
-	newTotal := current + total
-	return t.storage.Save(newTotal)
 }
 
 func (t *TotalizerService) Get() (int, error) {

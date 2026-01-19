@@ -18,7 +18,7 @@ func NewSumNumbersServer(service *service.AdderService) *SumNumbersServer {
 
 func (s *SumNumbersServer) SumNumbers(ctx context.Context, r *sumpb.SumNumbersRequest) (*sumpb.SumNumbersResponse, error) {
 	x, y := r.X, r.Y
-	sum, err := s.service.Add(int(x), int(y))
+	sum, err := s.service.Add(ctx, int(x), int(y))
 	if err != nil {
 		return nil, err
 	}

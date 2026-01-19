@@ -1,4 +1,44 @@
 services:
+  # PostgreSQL for Adder service
+  adder-postgres:
+    image: postgres:18-alpine
+    container_name: sumflow-adder-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: adder
+      POSTGRES_PASSWORD: adder
+      POSTGRES_DB: adder
+    networks:
+      - sumflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adder"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - adder-postgres-data:/var/lib/postgresql/data
+
+  # PostgreSQL for Totalizer service
+  totalizer-postgres:
+    image: postgres:18-alpine
+    container_name: sumflow-totalizer-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: totalizer
+      POSTGRES_PASSWORD: totalizer
+      POSTGRES_DB: totalizer
+    networks:
+      - sumflow-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U totalizer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - totalizer-postgres-data:/var/lib/postgresql/data
+
   kafka:
     image: confluentinc/cp-kafka:latest
     container_name: sumflow-kafka
@@ -58,12 +98,41 @@ services:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
+      adder-postgres:
+        condition: service_healthy
     ports:
       - "50051:50051"
     environment:
-      KAFKA_BROKERS: kafka:29092
-      KAFKA_TOPIC: sums
-      GRPC_PORT: 50051
+      - DB_DSN=postgres://adder:adder@adder-postgres:5432/adder?sslmode=disable
+      - KAFKA_BROKERS=kafka:29092
+      - KAFKA_TOPIC=sums
+      - GRPC_PORT=50051
+    command: ["-db-dsn", "postgres://adder:adder@adder-postgres:5432/adder?sslmode=disable", "-kafka-brokers", "kafka:29092", "-kafka-topic", "sums", "-port", "50051"]
+    networks:
+      - sumflow-network
+    restart: unless-stopped
+
+  totalizer:
+    build:
+      context: .
+      dockerfile: totalizer/Dockerfile
+    container_name: sumflow-totalizer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      totalizer-postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_DSN=postgres://totalizer:totalizer@totalizer-postgres:5432/totalizer?sslmode=disable
+      - KAFKA_BROKERS=kafka:29092
+      - KAFKA_TOPIC=sums
+      - KAFKA_GROUP_ID=totalizer-group
+      - HTTP_PORT=8080
+    command: ["-db-dsn", "postgres://totalizer:totalizer@totalizer-postgres:5432/totalizer?sslmode=disable", "-kafka-brokers", "kafka:29092", "-kafka-topic", "sums", "-kafka-group-id", "totalizer-group", "-port", "8080"]
     networks:
       - sumflow-network
     restart: unless-stopped
@@ -74,4 +143,8 @@ networks:
 
 volumes:
   kafka-data:
+    driver: local
+  adder-postgres-data:
+    driver: local
+  totalizer-postgres-data:
     driver: local

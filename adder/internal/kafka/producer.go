@@ -2,19 +2,11 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 
+	"github.com/aelhady03/sumflow/adder/internal/outbox"
 	kafka "github.com/segmentio/kafka-go"
 )
-
-type Producer interface {
-	Publish(sum int) error
-}
-
-type SumMessage struct {
-	Sum int `json:"sum"`
-}
 
 type KafkaProducer struct {
 	writer *kafka.Writer
@@ -30,17 +22,16 @@ func NewKafkaProducer(brokers []string, topic string) *KafkaProducer {
 	}
 }
 
-func (p *KafkaProducer) Publish(sum int) error {
-	msg := SumMessage{Sum: sum}
-
-	data, err := json.Marshal(msg)
+// PublishEvent publishes an outbox event to Kafka
+func (p *KafkaProducer) PublishEvent(ctx context.Context, event *outbox.Event) error {
+	data, err := event.ToJSON()
 	if err != nil {
 		return err
 	}
 
-	err = p.writer.WriteMessages(context.Background(), kafka.Message{
-		Key:   []byte("sum"),
-		Value: []byte(data),
+	err = p.writer.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(event.AggregateID),
+		Value: data,
 	})
 
 	if err != nil {

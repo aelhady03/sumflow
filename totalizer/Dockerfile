@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-w -s' -o /app/bin/adder ./adder/cmd/grpc
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-w -s' -o /app/bin/totalizer ./totalizer/cmd/api
 
 # Runtime stage
 FROM alpine:3.19
@@ -25,10 +25,10 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /app/bin/adder .
+COPY --from=builder /app/bin/totalizer .
 
-# Expose gRPC port
-EXPOSE 50051
+# Expose HTTP port
+EXPOSE 8080
 
 # Run as non-root user
 RUN addgroup -g 1000 appuser && \
@@ -38,4 +38,4 @@ RUN addgroup -g 1000 appuser && \
 USER appuser
 
 # Run the application
-ENTRYPOINT ["./adder"]
+ENTRYPOINT ["./totalizer"]
