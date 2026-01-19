@@ -13,4 +13,4 @@ message SumNumbersRequest {
   int32 y = 2;
 }
 
-message SumNumbersResponse { int32 z = 1; }
+message SumNumbersResponse { int32 sum = 1; }

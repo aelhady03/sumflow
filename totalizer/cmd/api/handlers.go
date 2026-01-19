@@ -2,8 +2,6 @@ package main
 
 import (
 	"net/http"
-
-	"github.com/aelhady03/sumflow/totalizer/internal/data"
 )
 
 // healthcheckHandler returns a simple status message to indicate that the API is running.
@@ -26,10 +24,13 @@ func (app *application) healthcheckHandler(w http.ResponseWriter, r *http.Reques
 // getResultHandler returns a simple sum result.
 func (app *application) getResultHandler(w http.ResponseWriter, r *http.Request) {
 
-	result := data.Sum{
-		Total: 10,
+	total, err := app.service.Get()
+	if err != nil {
+		app.serverErrorResponse(w, r, err)
+		return
 	}
-	err := app.writeJSON(w, http.StatusOK, envelope{"result": result}, nil)
+
+	err = app.writeJSON(w, http.StatusOK, envelope{"result": total}, nil)
 	if err != nil {
 		app.serverErrorResponse(w, r, err)
 	}

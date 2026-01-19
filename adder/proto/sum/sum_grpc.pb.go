@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v6.33.1
-// source: proto/sum/sum.proto
+// source: adder/proto/sum/sum.proto
 
 package sumpb
 
@@ -117,5 +117,5 @@ var SumNumbersService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/sum/sum.proto",
+	Metadata: "adder/proto/sum/sum.proto",
 }

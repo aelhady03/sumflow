@@ -7,18 +7,25 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/aelhady03/sumflow/totalizer/internal/service"
+	"github.com/aelhady03/sumflow/totalizer/internal/storage"
 )
 
 const version = "1.0.0"
 
 type config struct {
-	port int
-	env  string
+	port    int
+	env     string
+	storage struct {
+		filename string
+	}
 }
 
 type application struct {
-	config config
-	logger *slog.Logger
+	config  config
+	logger  *slog.Logger
+	service *service.TotalizerService
 }
 
 func main() {
@@ -26,13 +33,17 @@ func main() {
 
 	flag.IntVar(&cfg.port, "port", 8080, "API Server Port")
 	flag.StringVar(&cfg.env, "env", "development", "Environment (development|production)")
+	flag.StringVar(&cfg.storage.filename, "filename", "data.txt", "Filename to Load/Save total count")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	storage := storage.NewFileStorage(cfg.storage.filename)
+	service := service.NewTotalizerService(storage)
 
 	app := &application{
-		config: cfg,
-		logger: logger,
+		config:  cfg,
+		logger:  logger,
+		service: service,
 	}
 
 	srv := &http.Server{
@@ -44,7 +55,7 @@ func main() {
 		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	logger.Info("starting server", slog.String("addr", srv.Addr), slog.String("env", app.config.env))
+	logger.Info("starting server", slog.String("addr", srv.Addr), slog.String("env", app.config.env), slog.String("filename", app.config.storage.filename))
 
 	err := srv.ListenAndServe()
 
