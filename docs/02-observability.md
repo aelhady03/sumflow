@@ -1,247 +1,168 @@
-# Phase 2: OpenTelemetry Observability
+# Phase 2: OpenTelemetry Observability Implementation Plan
 
 ## Overview
 
-Add distributed tracing and metrics to both services using OpenTelemetry, with specific focus on Kafka message delivery latency.
+Add distributed tracing (OTel → Jaeger) and metrics (Prometheus) to Adder and Totalizer services, with Kafka message delivery latency tracking.
 
 ## Architecture
 
 ```
-┌──────────────────┐     ┌──────────────────┐
-│  Adder Service   │     │ Totalizer Service│
-│  ┌────────────┐  │     │  ┌────────────┐  │
-│  │ OTel SDK   │  │     │  │ OTel SDK   │  │
-│  │ - Traces   │  │     │  │ - Traces   │  │
-│  │ - Metrics  │  │     │  │ - Metrics  │  │
-│  └─────┬──────┘  │     │  └─────┬──────┘  │
-└────────┼─────────┘     └────────┼─────────┘
-         │                        │
-         │    OTLP/gRPC          │
-         └───────────┬───────────┘
+┌─────────────────┐         ┌─────────────────┐
+│  Adder Service  │         │Totalizer Service│
+│  gRPC :50051    │         │  HTTP :8080     │
+│  metrics :9090  │         │  /metrics       │
+└────────┬────────┘         └────────┬────────┘
+         │ OTLP/gRPC                 │ OTLP/gRPC
+         └───────────┬───────────────┘
                      ▼
-           ┌─────────────────┐
-           │  OTel Collector │
-           │  - Batch        │
-           │  - Export       │
-           └────────┬────────┘
-                    │
-        ┌───────────┴───────────┐
-        ▼                       ▼
-┌───────────────┐       ┌───────────────┐
-│  Prometheus   │       │    Jaeger     │
-│  (Metrics)    │       │   (Traces)    │
-└───────┬───────┘       └───────────────┘
-        │
-        ▼
-┌───────────────┐
-│    Grafana    │
-│  (Dashboards) │
-└───────────────┘
+              ┌──────────────┐
+              │OTel Collector│
+              │    :4317     │
+              └──────┬───────┘
+                     ▼
+              ┌──────────────┐
+              │    Jaeger    │  (traces)
+              │   :16686     │
+              └──────────────┘
+
+Prometheus scrapes :9090 (adder) and :8080/metrics (totalizer)
 ```
 
-## Kafka Latency Tracking
+## Design Decisions
 
-### How It Works
+1. **OTel for traces, Prometheus client for metrics** - simpler than routing metrics through OTel Collector
+2. **Trace context in Kafka headers** - W3C TraceContext propagation
+3. **Two latency metrics**:
+   - `event_processing_latency` — uses `created_at` (full lifecycle: creation → consumer)
+   - `kafka_delivery_latency` — uses new `published_at` field (Kafka-only: publish → consumer)
 
-1. **Producer** adds `produced_at` timestamp to message payload
-2. **Consumer** calculates `latency = time.Since(produced_at)`
-3. Latency recorded as histogram metric with topic label
+## Dependencies (via `go get`)
 
-### Message Structure
-
-```go
-type SumMessage struct {
-    Sum        int       `json:"sum"`
-    ProducedAt time.Time `json:"produced_at"`  // For latency calculation
-    TraceID    string    `json:"trace_id"`     // For trace correlation
-    SpanID     string    `json:"span_id"`
-}
+```bash
+go get go.opentelemetry.io/otel
+go get go.opentelemetry.io/otel/sdk
+go get go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc
+go get go.opentelemetry.io/otel/propagation
+go get go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc
+go get github.com/prometheus/client_golang/prometheus
+go get github.com/prometheus/client_golang/prometheus/promhttp
 ```
 
-### Latency Metric
+## Files to Create/Modify
 
-```go
-kafka.message.delivery.latency (histogram)
-  Labels: topic
-  Buckets: 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 ms
-```
-
-## Files to Create
-
-### Shared Package
+### New Files
 
 | File | Description |
 |------|-------------|
-| `pkg/telemetry/telemetry.go` | OTel provider initialization |
-| `pkg/telemetry/kafka_metrics.go` | Kafka-specific metrics |
+| `pkg/telemetry/telemetry.go` | OTel tracer provider initialization |
+| `pkg/telemetry/kafka_metrics.go` | Prometheus metrics for Kafka |
+| `otel-collector-config.yaml` | Collector config (OTLP → Jaeger) |
+| `prometheus.yml` | Prometheus scrape config |
 
-### Adder Service
-
-| File | Changes |
-|------|---------|
-| `cmd/grpc/main.go` | Add OTel init, metrics endpoint |
-| `internal/kafka/producer.go` | Add timestamp, trace context |
-
-### Totalizer Service
+### Modified Files
 
 | File | Changes |
 |------|---------|
-| `cmd/api/main.go` | Add OTel init, HTTP middleware |
-| `internal/kafka/consumer.go` | Calculate and record latency |
+| `adder/internal/outbox/event.go` | Add `PublishedAt` to JSON serialization (change `json:"-"` to `json:"published_at,omitempty"`) |
+| `adder/cmd/grpc/main.go` | Add OTel init, metrics HTTP server on :9090, gRPC interceptors |
+| `adder/internal/kafka/producer.go` | Set `published_at` timestamp, add tracing span, inject trace context |
+| `totalizer/internal/kafka/consumer.go` | Add `PublishedAt` field to Event struct, extract trace context, record both latency metrics |
+| `totalizer/cmd/api/main.go` | Add OTel init |
+| `totalizer/cmd/api/routes.go` | Add `/metrics` endpoint |
+| `docker-compose.yml` | Add otel-collector, jaeger, prometheus services |
 
-## Key Code
+## Key Implementation Details
 
-### Telemetry Provider
-
-```go
-// pkg/telemetry/telemetry.go
-func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
-    res, _ := resource.New(ctx,
-        resource.WithAttributes(
-            semconv.ServiceName(cfg.ServiceName),
-            semconv.ServiceVersion(cfg.ServiceVersion),
-        ),
-    )
-
-    traceExporter, _ := otlptracegrpc.New(ctx,
-        otlptracegrpc.WithEndpoint(cfg.OTelEndpoint),
-        otlptracegrpc.WithInsecure(),
-    )
-
-    metricExporter, _ := otlpmetricgrpc.New(ctx,
-        otlpmetricgrpc.WithEndpoint(cfg.OTelEndpoint),
-        otlpmetricgrpc.WithInsecure(),
-    )
-
-    // Configure providers...
-    otel.SetTracerProvider(tracerProvider)
-    otel.SetMeterProvider(meterProvider)
-
-    return &Provider{...}, nil
-}
-```
-
-### Kafka Metrics
+### 1. Telemetry Provider (`pkg/telemetry/telemetry.go`)
 
 ```go
-// pkg/telemetry/kafka_metrics.go
-type KafkaMetrics struct {
-    messageLatency   metric.Float64Histogram
-    messagesProduced metric.Int64Counter
-    messagesConsumed metric.Int64Counter
-    producerErrors   metric.Int64Counter
-    consumerErrors   metric.Int64Counter
-}
-
-func (m *KafkaMetrics) RecordMessageConsumed(ctx context.Context, topic string, producedAt time.Time) {
-    latencyMs := float64(time.Since(producedAt).Milliseconds())
-
-    m.messagesConsumed.Add(ctx, 1, metric.WithAttributes(attribute.String("topic", topic)))
-    m.messageLatency.Record(ctx, latencyMs, metric.WithAttributes(attribute.String("topic", topic)))
-}
+func InitTracer(ctx context.Context, cfg Config) (shutdown func(context.Context) error, error)
 ```
+- Creates OTLP gRPC exporter
+- Sets up TracerProvider with batching
+- Configures W3C TraceContext propagator
 
-### Instrumented Producer
+### 2. Kafka Metrics (`pkg/telemetry/kafka_metrics.go`)
 
 ```go
-func (p *KafkaProducer) Publish(ctx context.Context, sum int) error {
-    ctx, span := p.tracer.Start(ctx, "kafka.produce")
-    defer span.End()
-
-    spanCtx := trace.SpanContextFromContext(ctx)
-
-    msg := SumMessage{
-        Sum:        sum,
-        ProducedAt: time.Now().UTC(),
-        TraceID:    spanCtx.TraceID().String(),
-        SpanID:     spanCtx.SpanID().String(),
-    }
-
-    // Publish and record metric...
-    p.metrics.RecordMessageProduced(ctx, p.topic)
-    return nil
-}
+var EventProcessingLatency = promauto.NewHistogramVec(...)   // created_at → consumer (full lifecycle)
+var KafkaDeliveryLatency = promauto.NewHistogramVec(...)     // published_at → consumer (Kafka only)
+var KafkaMessagesProduced = promauto.NewCounterVec(...)
+var KafkaMessagesConsumed = promauto.NewCounterVec(...)
 ```
 
-### Instrumented Consumer
+Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s
+
+### 3. Kafka Header Carrier (for trace propagation)
 
 ```go
-func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message) {
-    ctx, span := c.tracer.Start(ctx, "kafka.consume")
-    defer span.End()
-
-    var sumMsg SumMessage
-    json.Unmarshal(msg.Value, &sumMsg)
-
-    // Record latency metric
-    c.metrics.RecordMessageConsumed(ctx, c.topic, sumMsg.ProducedAt)
-
-    // Process message...
-}
+type kafkaHeaderCarrier []kafka.Header
+func (c *kafkaHeaderCarrier) Get(key string) string
+func (c *kafkaHeaderCarrier) Set(key, value string)
+func (c *kafkaHeaderCarrier) Keys() []string
 ```
 
-## Metrics Endpoints
+### 4. Producer Instrumentation (`adder/internal/kafka/producer.go`)
 
-| Service | Port | Path |
-|---------|------|------|
-| Adder | 9090 | /metrics |
-| Totalizer | 9091 | /metrics |
+- Set `event.PublishedAt = time.Now().UTC()` before serializing
+- Start span `kafka.produce` with SpanKindProducer
+- Inject trace context: `otel.GetTextMapPropagator().Inject(ctx, &headers)`
+- Record `kafka_messages_produced_total` counter
 
-## Custom Metrics Summary
+### 5. Consumer Instrumentation (`totalizer/internal/kafka/consumer.go`)
+
+- Extract trace context: `otel.GetTextMapPropagator().Extract(ctx, carrier)`
+- Start span `kafka.consume` with SpanKindConsumer (linked to producer)
+- Record both latencies:
+  - `event_processing_latency_seconds` = `time.Since(event.CreatedAt)`
+  - `kafka_delivery_latency_seconds` = `time.Since(event.PublishedAt)`
+- Record `kafka_messages_consumed_total` counter
+
+## Metrics Summary
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `kafka.message.delivery.latency` | Histogram | topic | End-to-end latency (ms) |
-| `kafka.messages.produced.total` | Counter | topic | Messages published |
-| `kafka.messages.consumed.total` | Counter | topic | Messages consumed |
-| `kafka.producer.errors.total` | Counter | topic, error_type | Producer failures |
-| `kafka.consumer.errors.total` | Counter | topic, error_type | Consumer failures |
-| `kafka.consumer.lag` | Gauge | topic, partition | Consumer lag |
+| `event_processing_latency_seconds` | Histogram | topic, event_type | Full lifecycle: event creation → consumer |
+| `kafka_delivery_latency_seconds` | Histogram | topic, event_type | Kafka only: publish → consumer |
+| `kafka_messages_produced_total` | Counter | topic, status | Messages sent to Kafka |
+| `kafka_messages_consumed_total` | Counter | topic, event_type, status | Messages consumed (success/error/duplicate) |
 
-## Alert Rules
+## Docker Compose Additions
 
 ```yaml
-# P99 latency > 500ms for 2 minutes
-- alert: KafkaMessageLatencyHigh
-  expr: histogram_quantile(0.99, rate(kafka_message_delivery_latency_bucket[5m])) > 500
-  for: 2m
-  labels:
-    severity: warning
+otel-collector:
+  image: otel/opentelemetry-collector-contrib:latest
+  ports: ["4317:4317"]
 
-# P99 latency > 1000ms (critical)
-- alert: KafkaMessageLatencyCritical
-  expr: histogram_quantile(0.99, rate(kafka_message_delivery_latency_bucket[5m])) > 1000
-  for: 1m
-  labels:
-    severity: critical
+jaeger:
+  image: jaegertracing/jaeger:latest
+  ports: ["16686:16686"]
 
-# Consumer lag > 1000 messages
-- alert: KafkaConsumerLagHigh
-  expr: kafka_consumer_lag > 1000
-  for: 5m
-  labels:
-    severity: warning
+prometheus:
+  image: prom/prometheus:latest
+  ports: ["9099:9090"]
 ```
 
-## Dependencies
+## Implementation Sequence
 
-```go
-// Add to go.mod
-go.opentelemetry.io/otel v1.24.0
-go.opentelemetry.io/otel/sdk v1.24.0
-go.opentelemetry.io/otel/sdk/metric v1.24.0
-go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.24.0
-go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.24.0
-go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.49.0
-go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.49.0
-github.com/prometheus/client_golang v1.19.0
-```
+1. Create `pkg/telemetry/` package (telemetry.go, kafka_metrics.go)
+2. Update Adder service (main.go, producer.go)
+3. Update Totalizer service (main.go, routes.go, consumer.go)
+4. Add infrastructure configs (otel-collector-config.yaml, prometheus.yml)
+5. Update docker-compose.yml
 
-## Testing Checklist
+## Verification
 
-- [ ] Traces appear in Jaeger for gRPC calls
-- [ ] Traces appear for Kafka produce/consume
-- [ ] `kafka.message.delivery.latency` histogram populated in Prometheus
-- [ ] Latency dashboard shows P50/P95/P99 correctly
-- [ ] Alert fires when latency threshold exceeded
-- [ ] Service health endpoints return 200
+1. Start services: `docker-compose up --build`
+2. Make gRPC request to Adder (e.g., via grpcurl or test client)
+3. **Check Jaeger UI** at http://localhost:16686:
+   - Trace should show: `grpc.server/SumNumbers` → `kafka.produce` → `kafka.consume`
+   - Spans linked via trace context propagation
+4. **Check Prometheus** at http://localhost:9099 - queries:
+   - `event_processing_latency_seconds_bucket` (full lifecycle latency)
+   - `kafka_delivery_latency_seconds_bucket` (Kafka-only latency)
+   - `kafka_messages_produced_total`
+   - `kafka_messages_consumed_total`
+5. **Verify metrics endpoints**:
+   - `curl http://localhost:9090/metrics` (adder)
+   - `curl http://localhost:8080/metrics` (totalizer)

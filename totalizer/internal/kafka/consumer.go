@@ -7,13 +7,43 @@ import (
 	"log"
 	"time"
 
+	"github.com/aelhady03/sumflow/pkg/telemetry"
 	"github.com/aelhady03/sumflow/totalizer/internal/dedup"
 	"github.com/aelhady03/sumflow/totalizer/internal/storage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	kafka "github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+var tracer = otel.Tracer("kafka-consumer")
+
+// kafkaHeaderCarrier implements propagation.TextMapCarrier for Kafka headers
+type kafkaHeaderCarrier []kafka.Header
+
+func (c kafkaHeaderCarrier) Get(key string) string {
+	for _, h := range c {
+		if h.Key == key {
+			return string(h.Value)
+		}
+	}
+	return ""
+}
+
+func (c kafkaHeaderCarrier) Set(key, value string) {
+	// Not used for extraction, but required by interface
+}
+
+func (c kafkaHeaderCarrier) Keys() []string {
+	keys := make([]string, len(c))
+	for i, h := range c {
+		keys[i] = h.Key
+	}
+	return keys
+}
 
 // Event represents a Kafka message from the outbox
 type Event struct {
@@ -23,6 +53,7 @@ type Event struct {
 	EventType     string          `json:"event_type"`
 	Payload       json.RawMessage `json:"payload"`
 	CreatedAt     time.Time       `json:"created_at"`
+	PublishedAt   *time.Time      `json:"published_at,omitempty"`
 }
 
 // SumCalculatedPayload represents the payload for sum.calculated events
@@ -44,6 +75,7 @@ type Consumer struct {
 	dedupRepo *dedup.Repository
 	storage   *storage.PostgresStorage
 	stopCh    chan struct{}
+	topic     string
 }
 
 func NewConsumer(cfg ConsumerConfig, pool *pgxpool.Pool, dedupRepo *dedup.Repository, storage *storage.PostgresStorage) *Consumer {
@@ -63,6 +95,7 @@ func NewConsumer(cfg ConsumerConfig, pool *pgxpool.Pool, dedupRepo *dedup.Reposi
 		dedupRepo: dedupRepo,
 		storage:   storage,
 		stopCh:    make(chan struct{}),
+		topic:     cfg.Topic,
 	}
 }
 
@@ -108,15 +141,51 @@ func (c *Consumer) consumeLoop(ctx context.Context) {
 }
 
 func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message) error {
+	// Extract trace context from headers
+	carrier := kafkaHeaderCarrier(msg.Headers)
+	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+
+	// Start consumer span
+	ctx, span := tracer.Start(ctx, "kafka.consume",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.destination", c.topic),
+		),
+	)
+	defer span.End()
+
 	var event Event
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
 		log.Printf("error unmarshaling event: %v", err)
+		telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, "unknown", "error").Inc()
+		span.RecordError(err)
 		return nil // Skip malformed messages
 	}
+
+	// Record latency metrics
+	now := time.Now()
+
+	// Event processing latency (full lifecycle: created_at → now)
+	eventLatency := now.Sub(event.CreatedAt).Seconds()
+	telemetry.EventProcessingLatency.WithLabelValues(c.topic, event.EventType).Observe(eventLatency)
+
+	// Kafka delivery latency (Kafka only: published_at → now)
+	if event.PublishedAt != nil {
+		kafkaLatency := now.Sub(*event.PublishedAt).Seconds()
+		telemetry.KafkaDeliveryLatency.WithLabelValues(c.topic, event.EventType).Observe(kafkaLatency)
+	}
+
+	span.SetAttributes(
+		attribute.String("messaging.message_id", event.EventID.String()),
+		attribute.String("event.type", event.EventType),
+	)
 
 	// Start transaction
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
+		telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, event.EventType, "error").Inc()
+		span.RecordError(err)
 		return err
 	}
 	defer tx.Rollback(ctx)
@@ -125,18 +194,30 @@ func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message) error 
 	err = c.dedupRepo.CheckAndMarkInTx(ctx, tx, event.EventID, event.AggregateType, event.EventType)
 	if errors.Is(err, dedup.ErrEventAlreadyProcessed) {
 		log.Printf("event %s already processed, skipping", event.EventID)
+		telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, event.EventType, "duplicate").Inc()
 		return nil // Already processed, skip
 	}
 	if err != nil {
+		telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, event.EventType, "error").Inc()
+		span.RecordError(err)
 		return err
 	}
 
 	// Process the event based on type
 	if err := c.handleEvent(ctx, tx, &event); err != nil {
+		telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, event.EventType, "error").Inc()
+		span.RecordError(err)
 		return err
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, event.EventType, "error").Inc()
+		span.RecordError(err)
+		return err
+	}
+
+	telemetry.KafkaMessagesConsumed.WithLabelValues(c.topic, event.EventType, "success").Inc()
+	return nil
 }
 
 func (c *Consumer) handleEvent(ctx context.Context, tx pgx.Tx, event *Event) error {

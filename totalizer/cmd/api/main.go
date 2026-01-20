@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aelhady03/sumflow/pkg/telemetry"
 	"github.com/aelhady03/sumflow/totalizer/internal/database"
 	"github.com/aelhady03/sumflow/totalizer/internal/dedup"
 	"github.com/aelhady03/sumflow/totalizer/internal/kafka"
@@ -29,6 +30,7 @@ type config struct {
 	kafkaBrokers string
 	kafkaTopic   string
 	kafkaGroupID string
+	otlpEndpoint string
 }
 
 type application struct {
@@ -48,12 +50,23 @@ func main() {
 	flag.StringVar(&cfg.kafkaBrokers, "kafka-brokers", "kafka:9092", "Kafka broker addresses (comma-separated)")
 	flag.StringVar(&cfg.kafkaTopic, "kafka-topic", "sums", "Kafka topic to consume")
 	flag.StringVar(&cfg.kafkaGroupID, "kafka-group-id", "totalizer-group", "Kafka consumer group ID")
+	flag.StringVar(&cfg.otlpEndpoint, "otlp-endpoint", "otel-collector:4317", "OpenTelemetry Collector endpoint")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Initialize telemetry
+	shutdownTracer, err := telemetry.InitTracer(ctx, telemetry.Config{
+		ServiceName:    "totalizer",
+		ServiceVersion: version,
+		OTLPEndpoint:   cfg.otlpEndpoint,
+	})
+	if err != nil {
+		log.Printf("Warning: failed to initialize tracer: %v", err)
+	}
 
 	// Initialize database
 	dbConfig := database.DefaultConfig(cfg.dbDSN)
@@ -119,6 +132,12 @@ func main() {
 
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("error shutting down server", slog.String("error", err.Error()))
+		}
+
+		if shutdownTracer != nil {
+			if err := shutdownTracer(shutdownCtx); err != nil {
+				logger.Error("error shutting down tracer", slog.String("error", err.Error()))
+			}
 		}
 
 		logger.Info("shutdown complete")

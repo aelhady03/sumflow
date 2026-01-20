@@ -19,7 +19,7 @@ type Event struct {
 	EventType     string          `json:"event_type"`
 	Payload       json.RawMessage `json:"payload"`
 	CreatedAt     time.Time       `json:"created_at"`
-	PublishedAt   *time.Time      `json:"-"`
+	PublishedAt   *time.Time      `json:"published_at,omitempty"`
 	RetryCount    int             `json:"-"`
 	LastError     *string         `json:"-"`
 }

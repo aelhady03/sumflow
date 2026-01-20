@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'adder'
+    static_configs:
+      - targets: ['adder:9090']
+    metrics_path: /metrics
+
+  - job_name: 'totalizer'
+    static_configs:
+      - targets: ['totalizer:8080']
+    metrics_path: /metrics

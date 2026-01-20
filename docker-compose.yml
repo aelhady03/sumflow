@@ -88,6 +88,41 @@ services:
     networks:
       - sumflow-network
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: sumflow-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    networks:
+      - sumflow-network
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    container_name: sumflow-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    networks:
+      - sumflow-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sumflow-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9099:9090"
+    networks:
+      - sumflow-network
+
   adder:
     build:
       context: .
@@ -100,14 +135,18 @@ services:
         condition: service_completed_successfully
       adder-postgres:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     ports:
       - "50051:50051"
+      - "9090:9090"
     environment:
       - DB_DSN=postgres://adder:adder@adder-postgres:5432/adder?sslmode=disable
       - KAFKA_BROKERS=kafka:29092
       - KAFKA_TOPIC=sums
       - GRPC_PORT=50051
-    command: ["-db-dsn", "postgres://adder:adder@adder-postgres:5432/adder?sslmode=disable", "-kafka-brokers", "kafka:29092", "-kafka-topic", "sums", "-port", "50051"]
+      - OTLP_ENDPOINT=otel-collector:4317
+    command: ["-db-dsn", "postgres://adder:adder@adder-postgres:5432/adder?sslmode=disable", "-kafka-brokers", "kafka:29092", "-kafka-topic", "sums", "-port", "50051", "-otlp-endpoint", "otel-collector:4317"]
     networks:
       - sumflow-network
     restart: unless-stopped
@@ -124,6 +163,8 @@ services:
         condition: service_completed_successfully
       totalizer-postgres:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     ports:
       - "8080:8080"
     environment:
@@ -132,7 +173,8 @@ services:
       - KAFKA_TOPIC=sums
       - KAFKA_GROUP_ID=totalizer-group
       - HTTP_PORT=8080
-    command: ["-db-dsn", "postgres://totalizer:totalizer@totalizer-postgres:5432/totalizer?sslmode=disable", "-kafka-brokers", "kafka:29092", "-kafka-topic", "sums", "-kafka-group-id", "totalizer-group", "-port", "8080"]
+      - OTLP_ENDPOINT=otel-collector:4317
+    command: ["-db-dsn", "postgres://totalizer:totalizer@totalizer-postgres:5432/totalizer?sslmode=disable", "-kafka-brokers", "kafka:29092", "-kafka-topic", "sums", "-kafka-group-id", "totalizer-group", "-port", "8080", "-otlp-endpoint", "otel-collector:4317"]
     networks:
       - sumflow-network
     restart: unless-stopped
